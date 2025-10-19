@@ -23,10 +23,21 @@ router.get("/", async (req: Request, res: Response): Promise<void> => {
 
 // POST /users — регистрация нового пользователя
 router.post("/", async (req: Request, res: Response): Promise<void> => {
-  const { username, password } = req.body;
+  const { username, password, email } = req.body;
 
+  // Проверяем обязательные поля
   if (!username || !password) {
     res.status(400).send("Имя пользователя и пароль обязательны");
+    return;
+  }
+
+  // Если email не передан, ставим пустую строку
+  const userEmail = typeof email === "string" ? email : "";
+
+  // Опционально: проверка валидности email, если передан
+  const isValidEmail = (email: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+  if (userEmail && !isValidEmail(userEmail)) {
+    res.status(400).send("Некорректный email");
     return;
   }
 
@@ -34,8 +45,8 @@ router.post("/", async (req: Request, res: Response): Promise<void> => {
     const user_id = uuidv4();
 
     const [result] = await pool.query(
-      "INSERT INTO users (user_id, username, password, date_reg) VALUES (?, ?, ?, NOW())",
-      [user_id, username, password]
+      "INSERT INTO users (user_id, username, password, email, date_reg) VALUES (?, ?, ?, ?, NOW())",
+      [user_id, username, password, userEmail]
     );
 
     res.status(201).json({
@@ -111,6 +122,74 @@ router.get("/verify", (req: Request, res: Response): void => {
   } catch (err) {
     console.error("Ошибка проверки токена:", err);
     res.status(401).json({ valid: false, message: "Недействительный токен" });
+  }
+});
+
+// обновление email
+router.patch("/update-email/:user_id", async (req: Request, res: Response): Promise<void> => {
+  const { user_id } = req.params;
+  const { email } = req.body;
+
+  if (!user_id) {
+    res.status(400).send("user_id обязателен");
+    return;
+  }
+
+  if (typeof email !== "string") {
+    res.status(400).send("Email обязателен");
+    return;
+  }
+
+  // Проверка валидности email (можно отключить, если нужен любой текст)
+  const isValidEmail = (email: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+  if (email && !isValidEmail(email)) {
+    res.status(400).send("Некорректный email");
+    return;
+  }
+
+  try {
+    const [result]: any = await pool.query(
+      "UPDATE users SET email = ? WHERE user_id = ?",
+      [email, user_id]
+    );
+
+    if (result.affectedRows === 0) {
+      res.status(404).send("Пользователь не найден");
+      return;
+    }
+
+    res.status(200).json({
+      message: "Email успешно обновлён",
+      user_id,
+      email,
+    });
+  } catch (err: any) {
+    console.error("Ошибка при обновлении email:", err);
+    res.status(500).send("Ошибка сервера");
+  }
+});
+
+// получить конкретного пользователя
+router.get("/:user_id", async (req: Request, res: Response): Promise<void> => {
+  const { user_id } = req.params;
+
+  if (!user_id) {
+    res.status(400).send("user_id обязателен");
+    return;
+  }
+
+  try {
+    const [rows]: any = await pool.query("SELECT * FROM users WHERE user_id = ?", [user_id]);
+
+    if (rows.length === 0) {
+      res.status(404).send("Пользователь не найден");
+      return;
+    }
+
+    res.status(200).json(rows[0]);
+  } catch (err) {
+    console.error("Ошибка при получении пользователя:", err);
+    res.status(500).send("Ошибка сервера");
   }
 });
 

@@ -1,5 +1,6 @@
 import { Router } from "express";
 import type { Request, Response } from "express";
+import { sendEmail } from "./sendEmail.js";
 import pool from "../../config/db.js";
 
 export const router = Router();
@@ -17,6 +18,7 @@ router.post("/", async (req: Request, res: Response): Promise<void> => {
     // Добавляем поле createdAt для каждого объекта goals
     const goalsWithCreatedAt = goals.map((goal: any) => ({
       ...goal,
+      endDateTask: goal.endDateTask ?? "",
       createdAt: new Date().toISOString(),
     }));
 
@@ -133,7 +135,7 @@ router.delete("/:user_id/:createdAt", async (req: Request, res: Response): Promi
 
 router.patch("/:user_id/:createdAt", async (req: Request, res: Response): Promise<void> => {
   const { user_id, createdAt } = req.params;
-  const { status } = req.body; // статус приходит с фронта
+  const { status, dateDone } = req.body; // 👈 теперь принимаем дату выполнения
 
   if (!user_id || !createdAt) {
     res.status(400).json({ message: "user_id и createdAt обязательны" });
@@ -162,10 +164,15 @@ router.patch("/:user_id/:createdAt", async (req: Request, res: Response): Promis
         ? JSON.parse(rows[0].goals)
         : rows[0].goals;
 
-    // Обновляем статус нужной цели
+    // Обновляем нужную цель
     const updatedGoals = currentGoals.map(goal => {
       if (goal.createdAt === createdAt) {
-        return { ...goal, status }; // <-- ставим статус с фронта
+        return {
+          ...goal,
+          status,
+          // добавляем поле, если пришло значение
+          dateDone: dateDone ?? goal.dateDone ?? null
+        };
       }
       return goal;
     });
@@ -176,9 +183,132 @@ router.patch("/:user_id/:createdAt", async (req: Request, res: Response): Promis
       [JSON.stringify(updatedGoals), user_id]
     );
 
-    res.status(200).json({ message: "Статус цели обновлен", goals: updatedGoals });
+    res.status(200).json({
+      message: "Статус и дата выполнения обновлены",
+      goals: updatedGoals
+    });
   } catch (err: any) {
     console.error("Ошибка при обновлении цели:", err);
     res.status(500).json({ message: "Ошибка сервера" });
+  }
+});
+
+router.patch("/end-date/:user_id/:createdAt", async (req: Request, res: Response): Promise<void> => {
+  const { user_id, createdAt } = req.params;
+  const { endDateTask } = req.body;
+
+  if (!user_id || !createdAt) {
+    res.status(400).json({ message: "user_id и createdAt обязательны" });
+    return;
+  }
+
+  if (!endDateTask) {
+    res.status(400).json({ message: "endDateTask обязателен" });
+    return;
+  }
+
+  try {
+    const [rows]: any = await pool.query(
+      "SELECT goals FROM goals WHERE user_id = ?",
+      [user_id]
+    );
+
+    if (rows.length === 0) {
+      res.status(404).json({ message: "Пользователь не найден" });
+      return;
+    }
+
+    const currentGoals: any[] =
+      typeof rows[0].goals === "string"
+        ? JSON.parse(rows[0].goals)
+        : rows[0].goals;
+
+    const updatedGoals = currentGoals.map(goal => {
+      if (goal.createdAt === createdAt) {
+        return { ...goal, endDateTask };
+      }
+      return goal;
+    });
+
+    await pool.query(
+      "UPDATE goals SET goals = ? WHERE user_id = ?",
+      [JSON.stringify(updatedGoals), user_id]
+    );
+
+    res.status(200).json({ message: "Дата завершения задачи обновлена", goals: updatedGoals });
+  } catch (err: any) {
+    console.error("Ошибка при обновлении даты завершения:", err);
+    res.status(500).json({ message: "Ошибка сервера" });
+  }
+});
+
+router.post("/send-email/:user_id/:createdAt", async (req: Request, res: Response): Promise<void> => {
+  const { user_id, createdAt } = req.params;
+  const { to, subject, text } = req.body;
+
+  // Проверка обязательных данных
+  if (!user_id || !createdAt) {
+    res.status(400).json({ message: "user_id и createdAt обязательны" });
+    return;
+  }
+
+  if (!to || !subject || !text) {
+    res.status(400).json({ message: "Поля to, subject и text обязательны" });
+    return;
+  }
+
+  try {
+    // Проверяем, есть ли пользователь и его цели
+    const [rows]: any = await pool.query(
+      "SELECT goals FROM goals WHERE user_id = ?",
+      [user_id]
+    );
+
+    if (rows.length === 0) {
+      res.status(404).json({ message: "Пользователь не найден" });
+      return;
+    }
+
+    // Ищем задачу по createdAt
+    const currentGoals: any[] =
+      typeof rows[0].goals === "string"
+        ? JSON.parse(rows[0].goals)
+        : rows[0].goals;
+
+    const task = currentGoals.find((goal) => goal.createdAt === createdAt);
+
+    if (!task) {
+      res.status(404).json({ message: "Задача с таким createdAt не найдена" });
+      return;
+    }
+
+    // Отправляем письмо
+    const info = await sendEmail(to, subject, text);
+
+    console.log(`📧 Письмо по задаче "${task.title ?? "(без названия)"}" отправлено пользователю ${user_id}`);
+
+    // (опционально) — можно записать факт отправки письма в БД
+    // Например, добавить поле `emailSentAt` в задачу:
+    const updatedGoals = currentGoals.map((goal) =>
+      goal.createdAt === createdAt
+        ? { ...goal, emailSentAt: new Date().toISOString() }
+        : goal
+    );
+
+    await pool.query(
+      "UPDATE goals SET goals = ? WHERE user_id = ?",
+      [JSON.stringify(updatedGoals), user_id]
+    );
+
+    // Ответ клиенту
+    res.status(200).json({
+      success: true,
+      message: "Письмо успешно отправлено",
+      messageId: info.messageId,
+      updatedGoals,
+    });
+  } catch (error: any) {
+    console.error("Ошибка при отправке письма:", error);
+    res.status(500).json({ message: "Ошибка при отправке письма", error });
   }
 });
